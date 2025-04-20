@@ -173,10 +173,6 @@ dataUtil <- list(
 
 mySuppliers <- list(
   
-  attrSelector = function(or, all, not, supplier=html_elements){
-    
-  }
-  
   #parent의 자식노드(css)중 n번째를 선택함
   nthChildSelector = function(css, n){
     csss = paste0(css, ':nth-child(',n,')')
