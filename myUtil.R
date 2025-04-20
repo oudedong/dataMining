@@ -32,7 +32,7 @@ dataUtil <- list(
   sliceVector = function(vector, n){
     return(vector[1:n])
   },
-  parseChart = function(tableBody, textSuplier, rowLen){
+  parseChart = function(tableBody, textSuplier, rowLen, useHeader=TRUE){
     
     rows <- tableBody %>% html_elements('tr')
     cols <- vector(mode="list", length = rowLen)
@@ -45,7 +45,7 @@ dataUtil <- list(
         
         rowspan <- td[j] %>% html_attr("rowspan")
         colspan <- td[j] %>% html_attr("colspan")
-        text <- td[j] %>% textSuplier %>% html_text()
+        text <- td[j] %>% textSuplier %>% html_text2()
         
         if(is.na(colspan)) colspan <- 1
         else colspan <- as.numeric(colspan)
@@ -62,7 +62,10 @@ dataUtil <- list(
     ret <- bind_cols(sliced)
     #slice는 해당 행만 선택하거나 제외!!
     #setNames로 열의 이름변경가능!!!
-    ret <- ret %>% setNames(str_squish(unlist(slice_head(ret)))) %>% slice(-1)
+    if(useHeader){
+      ret <- ret %>% setNames(str_squish(unlist(slice_head(ret)))) %>% slice(-1)
+    }
+    return(ret)
   },
   groupTable = function(table, colNamesVector, supplier){
     
@@ -106,7 +109,7 @@ dataUtil <- list(
     }
     return(tableCols)
   },
-  fillMissing <- function(df, method = "mean") {
+  fillMissing = function(df, method = "mean") {
     for(i in 1:ncol(df)) {
       if(any(is.na(df[[i]]))) {
         if(method == "mean") {
@@ -119,5 +122,18 @@ dataUtil <- list(
       }
     }
     return(df)
+  },
+  scanHtmlStructure = function(url) {
+    all_nodes <- read_html(url) %>% html_elements("*")
+    
+    tag_info <- tibble(
+      tag    = all_nodes %>% html_name(),
+      class  = all_nodes %>% html_attr("class"),
+      id     = all_nodes %>% html_attr("id"),
+      href   = all_nodes %>% html_attr("href"),
+      text   = all_nodes %>% html_text2(),
+      node   = c(all_nodes)  # 노드 자체 포함!
+    )
+    return(tag_info)
   }
 )
