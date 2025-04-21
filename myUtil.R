@@ -1,30 +1,73 @@
-#setRepositories(ind=1:7)
-#install.packages("Rselenium")
-#install.packages("rvest")
-#install.packages("httr")
-#install.packages("jsonlite")
-#install.packages("dplyr")
-#install.packages("tidyverse")
-#install.packages("ggplot2")
-#install.packages("gganimate")
-#install.packages("gifski")
-#install.packages("rlang")
-#install.packages("R6")
+setUpUtil <- list(
+  setLibs = function(){
+    library(RSelenium)
+    library(rvest)
+    library(httr)
+    library(jsonlite)
+    library(data.table)
+    library(dplyr)
+    library(tidyverse)
+    library(ggplot2)
+    library(gganimate)
+    library(gifski)
+    library(data.table)
+    library(rlang)
+    library(stringi)
+  },
+  
+  installLib = function(){
+    setRepositories(ind=1:7)
+    install.packages("Rselenium")
+    install.packages("rvest")
+    install.packages("httr")
+    install.packages("jsonlite")
+    install.packages("dplyr")
+    install.packages("tidyverse")
+    install.packages("ggplot2")
+    install.packages("gganimate")
+    install.packages("gifski")
+    install.packages("rlang")
+    
+  },
+  
+  setRselenium = function(port=4445L){
+    rD <- remoteDriver(browser = "chrome", port = port)
+    rD$open()
+    return(rD)
+  }
+)
 
-library(RSelenium)
-library(rvest)
-library(httr)
-library(jsonlite)
-library(data.table)
-library(dplyr)
-library(tidyverse)
-library(ggplot2)
-library(gganimate)
-library(gifski)
-library(data.table)
-library(rlang)
-library(R6)
-library(stringi)
+caster <- list(
+  numericCaster = function(x){
+    
+    if(!is.character(x)) x <- as.character(x)
+    
+    x <- x %>% 
+      str_remove_all(",") %>% 
+      str_remove_all("%") %>% 
+      str_remove_all("\\+")
+    if(any(str_detect(x, "\\."))){
+      return(as.numeric(x))
+    }
+    return(as.integer(x))
+  },
+  
+  timeCaster = function(x){
+    
+    try_cast <- function(expr) {
+      tryCatch(expr, error = function(e) NULL, warning = function(w) NULL)
+    }
+    
+    if(!is.character(x)) x <- as.character(x)
+    
+    res <- try_cast(as.Date(x))
+    if (!is.null(res) && !all(is.na(res))) return(res)
+    res <- try_cast(ymd(x))
+    if (!is.null(res) && !all(is.na(res))) return(res)
+    res <- try_cast(dmy(x))
+    if (!is.null(res) && !all(is.na(res))) return(res)
+  }
+)
 
 # 유틸리티 함수 모음 (웹 크롤링 후 정제용)
 dataUtil <- list(
@@ -32,6 +75,40 @@ dataUtil <- list(
   # 벡터나 리스트의 앞 n개만 추출 (row trimming에 사용)
   sliceVector = function(vector, n){
     return(vector[1:n])
+  },
+  
+  smart_cast = function(x, allow_factor) {
+    
+    res <- caster$numericCaster(x)
+    if (!is.null(res) && !any(is.na(res) & x != "NA")) return(res)
+    
+    res <- caster$timeCaster(x)
+    if (!is.null(res) && !all(is.na(res))) return(res)
+    
+    if (allow_factor) {
+      res <- try_cast(as.factor(x))
+      if (!is.null(res)) return(res)
+    }
+
+    return(x)
+  },
+  
+  auto_cast_df = function(df, allow_factor = FALSE) {
+    df %>% mutate(across(everything(), ~ dataUtil$smart_cast(., allow_factor = allow_factor)))
+  },
+  
+  # rootNodes: html 요소들
+  # rowSuplier: 행 추출 함수 (하나)
+  # colSupliers: 열 추출 함수 리스트 (하나)
+  # useHeader: 논리값 (TRUE/FALSE)
+  parseAnythingToTable_list <- function(rootNodes, rowSuplier, colSupliers, useHeader = FALSE) {
+    len <- length(rootNodes)
+    
+    rowSuplier  <- rep(list(rowSuplier), len)       # 리스트로 묶어 반복
+    colSupliers <- rep(list(colSupliers), len)      # 리스트 안에 리스트
+    useHeader   <- rep(useHeader, len)              # 논리값 벡터
+    
+    Map(parseAnythingToTable, rootNodes, rowSuplier, colSupliers, useHeader)
   },
   
   # 범용 HTML 파서: 테이블 외 임의 구조도 → tibble로 변환
@@ -51,7 +128,11 @@ dataUtil <- list(
     
     ret <- bind_cols(cols)  # 열 기준 결합
     if(useHeader){
-      ret <- ret %>% setNames(str_squish(unlist(slice_head(ret)))) %>% slice(-1)  # 첫 행을 헤더로
+      names <- ret %>% slice_head %>% mutate(across(
+        where(~ any(is.na(.)) | any(. == "")),
+        ~ paste0("na", .)
+      )) %>% unlist
+      ret <- ret %>% setNames(str_squish(names)) %>% slice(-1)  # 첫 행을 헤더로
     }
     return(ret)
   },
@@ -93,7 +174,11 @@ dataUtil <- list(
     
     ret <- bind_cols(sliced)
     if(useHeader){
-      ret <- ret %>% setNames(str_squish(unlist(slice_head(ret)))) %>% slice(-1)  # 첫 행을 열 이름으로
+      names <- ret %>% slice_head %>% mutate(across(
+        where(~ any(is.na(.)) | any(. == "")),
+        ~ paste0("na", .)
+      )) %>% unlist 
+      ret <- ret %>% setNames(str_squish(names)) %>% slice(-1)  # 첫 행을 열 이름으로
     }
     return(ret)
   },
@@ -139,25 +224,23 @@ dataUtil <- list(
     return(tableCols)
   },
   
-  # 결측값 채우기: 열별로 mean, median, mode 선택 가능
-  fillMissing = function(df, method = "mean") {
-    for(i in 1:ncol(df)) {
-      if(any(is.na(df[[i]]))) {
-        if(method == "mean") {
-          df[[i]][is.na(df[[i]])] <- mean(df[[i]], na.rm = TRUE)
-        } else if(method == "median") {
-          df[[i]][is.na(df[[i]])] <- median(df[[i]], na.rm = TRUE)
-        } else if(method == "mode") {
-          df[[i]][is.na(df[[i]])] <- as.numeric(names(sort(table(df[[i]]), decreasing = TRUE)[1]))
-        }
-      }
-    }
-    return(df)
+  replaceString = function(x, paterns, to) {
+    x %>% mutate(across(
+      where(is.character),
+      ~ str_replace_all(., paterns, to)
+    ))
   },
   
   # HTML 전체 구조 스캔: 태그, 클래스, id, href, 텍스트, 노드 자체까지 저장
-  scanHtmlStructure = function(url) {
-    all_nodes <- read_html(url) %>% html_elements("*")
+  htmlCollector = function(parent, predict=NULL) {
+    
+    if(is.null(predict)){
+      predict <- function(node){
+        return(TRUE)
+      }
+    }
+    
+    all_nodes <- parent %>% html_elements("*")
     
     tag_info <- tibble(
       tag    = all_nodes %>% html_name(),
@@ -166,7 +249,8 @@ dataUtil <- list(
       href   = all_nodes %>% html_attr("href"),
       text   = all_nodes %>% html_text2(),
       node   = c(all_nodes)  # HTML 노드 원본
-    )
+    ) %>% rowwise %>% filter(predict(node)) %>% ungroup()
+    
     return(tag_info)
   }
 )
@@ -243,7 +327,7 @@ mySuppliers <- list(
     }
   },
   
-  classSelectorStringGen <- function(or = NULL, all = NULL, not = NULL) {
+  classSelectorStringGen = function(or = NULL, all = NULL, not = NULL) {
     # or: 하나라도 해당되면
     or_selector <- if (!is.null(or)) paste0(".", or, collapse = ", ") else ""
       
@@ -261,5 +345,29 @@ mySuppliers <- list(
     }
       
     return(selector)
+  }
+)
+
+browerUtil <- list(
+  waitUntilVisible = function(remDr, css_selector, timeout = 10, interval = 0.5) {
+    start_time <- Sys.time()
+    
+    while (TRUE) {
+      result <- tryCatch({
+        elem <- remDr$findElement(using = "css selector", value = css_selector)
+        TRUE  # 찾았으면 TRUE 반환
+      }, error = function(e) {
+        FALSE  # 못 찾았으면 FALSE
+      })
+      
+      if (result) break  # 요소를 찾으면 루프 종료
+      
+      if (as.numeric(Sys.time() - start_time, units = "secs") > timeout) {
+        warning("waitUntilVisible: Timeout reached")
+        break
+      }
+      
+      Sys.sleep(interval)
+    }
   }
 )
