@@ -72,6 +72,20 @@ caster <- list(
 # 유틸리티 함수 모음 (웹 크롤링 후 정제용)
 dataUtil <- list(
   
+  makeHeader = function(x, height){
+    names <- x %>% slice_head(n=height) %>% summarise(across(everything(), ~ toString(.))) %>% unlist 
+    for(i in 1:length(names)){
+      if(names[[i]] == "") names[[i]] <- as.character(i)
+    }
+    names <- Map(function(names){
+      names <- str_split(names, ",\\s*")[[1]]
+      names <- unique(names) %>% str_flatten(collapse = ".")
+    }, names) %>% unlist
+    names(x) <- str_replace_all(make.names(str_squish(names), unique = TRUE), "\\.{2,}", ".")
+    x <- x %>% slice(-1:(-1*height))
+    return(x)
+  },
+  
   # 벡터나 리스트의 앞 n개만 추출 (row trimming에 사용)
   sliceVector = function(vector, n){
     return(vector[1:n])
@@ -101,18 +115,19 @@ dataUtil <- list(
   # rowSuplier: 행 추출 함수 (하나)
   # colSupliers: 열 추출 함수 리스트 (하나)
   # useHeader: 논리값 (TRUE/FALSE)
-  parseAnythingToTable_list <- function(rootNodes, rowSuplier, colSupliers, useHeader = FALSE) {
+  parseAnythingToTable_list <- function(rootNodes, rowSuplier, colSupliers, useHeader = FALSE, headerHeight=0) {
     len <- length(rootNodes)
     
     rowSuplier  <- rep(list(rowSuplier), len)       # 리스트로 묶어 반복
     colSupliers <- rep(list(colSupliers), len)      # 리스트 안에 리스트
     useHeader   <- rep(useHeader, len)              # 논리값 벡터
+    headerHeight<- rep(headerHeight, len)
     
-    Map(parseAnythingToTable, rootNodes, rowSuplier, colSupliers, useHeader)
+    Map(parseAnythingToTable, rootNodes, rowSuplier, colSupliers, useHeader,headerHeight)
   },
   
   # 범용 HTML 파서: 테이블 외 임의 구조도 → tibble로 변환
-  parseAnythingToTable = function(rootNode, rowSuplier, colSupliers, useHeader=FALSE){
+  parseAnythingToTable = function(rootNode, rowSuplier, colSupliers, useHeader=FALSE, headerHeight=0){
     rows <- rootNode %>% rowSuplier()  # 행 단위 노드 추출
     cols <- vector(mode="list", length = length(colSupliers))  # 열 공간 준비
     
@@ -128,29 +143,26 @@ dataUtil <- list(
     
     ret <- bind_cols(cols)  # 열 기준 결합
     if(useHeader){
-      names <- ret %>% slice_head %>% mutate(across(
-        where(~ any(is.na(.)) | any(. == "")),
-        ~ paste0("na", .)
-      )) %>% unlist
-      ret <- ret %>% setNames(str_squish(names)) %>% slice(-1)  # 첫 행을 헤더로
+      ret <- ret %>% dataUtil$makeHeader(headerHeight)
     }
     return(ret)
   },
   
   # 여러 테이블에 parseChart 적용 (인자 리스트 대응, 길이 1이면 자동 반복)
-  parseChart_list = function(tableBodies, textSupliers, rowLens, useHeaders){
+  parseChart_list = function(tableBodies, textSupliers, rowLens, useHeaders=FALSE, headerHeights=0){
     len <- length(tableBodies)  # 기준 길이
     
     # 길이 1이면 자동 반복 (broadcasting)
     if (length(textSupliers) == 1) textSupliers <- rep(textSupliers, len)
     if (length(rowLens) == 1)      rowLens      <- rep(rowLens, len)
     if (length(useHeaders) == 1)   useHeaders   <- rep(useHeaders, len)
+    if (length(useHeaders) == 1)   headerHeights <- rep(headerHeights, len)
     
-    return(Map(dataUtil$parseChart, tableBodies, textSupliers, rowLens, useHeaders))
+    return(Map(dataUtil$parseChart, tableBodies, textSupliers, rowLens, useHeaders, headerHeights))
   },
   
   # HTML table 파싱: rowspan/colspan 포함 정제된 tibble 반환
-  parseChart = function(tableBody, textSuplier, rowLen, useHeader=TRUE){
+  parseChart = function(tableBody, textSuplier, rowLen, useHeader=FALSE, headerHeight=0){
     rows <- tableBody %>% html_elements('tr')  # tr 기준으로 행 추출
     cols <- vector(mode="list", length = rowLen)  # 열 개수만큼 초기화
     
@@ -174,11 +186,7 @@ dataUtil <- list(
     
     ret <- bind_cols(sliced)
     if(useHeader){
-      names <- ret %>% slice_head %>% mutate(across(
-        where(~ any(is.na(.)) | any(. == "")),
-        ~ paste0("na", .)
-      )) %>% unlist 
-      ret <- ret %>% setNames(str_squish(names)) %>% slice(-1)  # 첫 행을 열 이름으로
+      ret <- ret %>% dataUtil$makeHeader(headerHeight)
     }
     return(ret)
   },
@@ -371,3 +379,4 @@ browerUtil <- list(
     }
   }
 )
+
