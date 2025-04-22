@@ -86,7 +86,7 @@ dataUtil <- list(
     if (!is.null(res) && !all(is.na(res))) return(res)
     
     if (allow_factor) {
-      res <- try_cast(as.factor(x))
+      res <- as.factor(x)
       if (!is.null(res)) return(res)
     }
 
