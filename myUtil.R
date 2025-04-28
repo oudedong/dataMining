@@ -17,7 +17,7 @@ setUpUtil <- list(
   
   installLib = function(){
     setRepositories(ind=1:7)
-    install.packages("Rselenium")
+    install.packages("RSelenium")
     install.packages("rvest")
     install.packages("httr")
     install.packages("jsonlite")
@@ -38,26 +38,28 @@ setUpUtil <- list(
 )
 ###############################################################
 castUtil <- list(
-  numericCaster = function(x){
+  numericCast = function(col, paterns = c(",", "%", "\\+", " ")){
     
-    if(!is.character(x)) x <- as.character(x)
+    col <- as.character(col)
     
-    x <- x %>% 
-      str_remove_all(",") %>% 
-      str_remove_all("%") %>% 
-      str_remove_all("\\+")
-    print("x: ")
-    print(x)
-    ret <- as.integer(x)
-    if(any(is.na(ret))){
-      ret <- as.numeric(x)
+    for(i in 1:length(paterns)){
+      col <- col %>% str_remove_all(paterns[i])  
     }
-    print("casted x: ")
+    
+    print("col: ")
+    print(col)
+    
+    ret <- as.integer(col)
+    if(any(is.na(ret))){
+      ret <- as.numeric(col)
+    }
+    
+    print("casted col: ")
     print(ret)
     return(ret)
   },
   
-  timeCaster = function(x){
+  timeCast = function(x){
     
     try_cast <- function(expr) {
       tryCatch(expr, error = function(e) NULL, warning = function(w) NULL)
@@ -65,54 +67,26 @@ castUtil <- list(
     
     if(!is.character(x)) x <- as.character(x)
     
-    res <- try_cast(as.Date(x))
-    if (!is.null(res) && !all(is.na(res))) return(res)
     res <- try_cast(ymd(x))
     if (!is.null(res) && !all(is.na(res))) return(res)
     res <- try_cast(dmy(x))
     if (!is.null(res) && !all(is.na(res))) return(res)
-  },
-  smart_cast = function(x, allow_factor) {
-    
-    res <- castUtil$numericCaster(x)
-    if (!is.null(res) && !any(is.na(res) & x != "NA")) return(res)
-    
-    res <- castUtil$timeCaster(x)
+    res <- try_cast(as.Date(x))
     if (!is.null(res) && !all(is.na(res))) return(res)
+  },
+  default_cast = function(x) {
     
-    if (allow_factor) {
-      res <- as.factor(x)
-      if (!is.null(res)) return(res)
-    }
+    res <- castUtil$numericCast(x)
+    if (!is.null(res) && !any(is.na(res))) return(res)
+    
+    res <- castUtil$timeCast(x)
+    if (!is.null(res) && !any(is.na(res))) return(res)
     
     return(x)
   },
   
-  auto_cast_df = function(df, allow_factor = FALSE) {
-    df %>% mutate(across(everything(), ~ castUtil$smart_cast(., allow_factor = allow_factor)))
-  },
-  
-  # 집계 함수: 특정 열로 group한 뒤, 나머지 열은 supplier로 summarise
-  groupTable = function(table, colNamesVector, supplier){
-    colsToSummerize <- setdiff(colnames(table), colNamesVector)
-    
-    ret <- table %>% 
-      group_by(across(all_of(colNamesVector))) %>%
-      summarise(across(all_of(colsToSummerize), supplier, .names="{.col}"))  # 열별 요약
-  },
-  
-  replaceString = function(x, paterns, to) {
-    x %>% mutate(across(
-      where(is.character),
-      ~ str_replace_all(., paterns, to)
-    ))
-  }
-)
-##########################################
-etcUtil <- list(
-  # 벡터나 리스트의 앞 n개만 추출 (row trimming에 사용)
-  sliceVector = function(vector, n){
-    return(vector[1:n])
+  default_cast_df = function(df) {
+    df %>% mutate(across(everything(), castUtil$default_cast))
   }
 )
 ##################################################
@@ -142,18 +116,47 @@ browerUtil <- list(
 #############################################
 #크롤링 유틸
 collectUtil <- list(
-  parseChart = function(tableBody, rowLen){
-    rows <- tableBody %>% html_elements('tr')  # tr 기준으로 행 추출
+  parseAnything = function(rootNode, rowPath, colPath, rowLen = 0, padding = FALSE){
+    
+    rows <- rootNode %>% html_elements(rowPath)  # tr 기준으로 행 추출
     cols <- vector(mode="list", length = rowLen)  # 열 개수만큼 초기화
     
     print("rowlen:")
     print(length(rows))
     
     for(i in 1:length(rows)){
-      elements <- rows[i] %>% html_elements('td, th')  # 셀 추출
+      elements <- rows[i] %>% html_elements(colPath)  # 셀 추출
       
-      print("collen:")
-      print(length(elements))
+      if(rowLen == 0){
+        for(j in 1:length(elements)){
+          colspan <- elements[j] %>% html_attr("colspan")
+          if(is.na(colspan)) colspan <- 1 
+          else colspan <- as.numeric(colspan)
+          rowLen <- rowLen + colspan
+        }
+        cols <- vector(mode="list", length = rowLen)
+        print("autoRowlen: ")
+        print(rowLen)
+      }
+      
+      
+      if(length(elements) != rowLen){
+        
+        print("collen:")
+        print(paste(i,length(elements)))
+        print("rowLen:")
+        print(rowLen)
+        
+        if(padding){
+          if(length(elements) > rowLen){
+            print("column Length is larger...")
+          }
+        }
+        else{
+          print("column Length mismatch...")
+          break
+        }
+      }
       
       for(j in 1:length(elements)){
         rowspan <- elements[j] %>% html_attr("rowspan")  # 병합 여부
@@ -164,15 +167,30 @@ collectUtil <- list(
         
         cols <- collectUtil$stackFromLeftEvenly(cols, rowLen, elements[j], rowspan, colspan)  # 셀 정렬
       }
+      if(padding && (rowLen > length(elements))){
+        print("pad:")
+        print(rowLen - length(elements))
+        for(j in 1:(rowLen - length(elements))){ #padding
+          cols <- collectUtil$stackFromLeftEvenly(cols, rowLen, elements[length(elements)], rowspan, colspan)
+        }
+      }
     }
     
-    print("lengths: ")
+    print("row length: ")
     print(length(cols))
+    print("col lengths: ")
+    Map(print, lapply(cols, length))
     
     names(cols) <- as.character(1:rowLen)
     ret <- do.call(tibble, cols)
     return(ret)
   },
+  
+  # 범용 HTML 파서: 테이블 외 임의 구조도 → tibble로 변환
+  parseChart = function(tableNode, rowLen=0, padding=FALSE){
+    collectUtil$parseAnything(tableNode, "tr", "th, td", rowLen, padding)
+  },
+  
   stackFromLeftEvenly = function(tableCols, rowLen, toPut, rowspan, colspan){
     mapTable <- list()
     curPos <- 1
@@ -205,42 +223,6 @@ collectUtil <- list(
     return(tableCols)
   },
   
-  # rootNodes: html 요소들
-  # rowSuplier: 행 추출 함수 (하나)
-  # colSupliers: 열 추출 함수 리스트 (하나)
-  # useHeader: 논리값 (TRUE/FALSE)
-  parseAnythingToTable_list = function(rootNodes, rowSuplier, colSupliers, useHeader = FALSE, headerHeight=0) {
-    len <- length(rootNodes)
-    
-    rowSuplier  <- rep(list(rowSuplier), len)       # 리스트로 묶어 반복
-    colSupliers <- rep(list(colSupliers), len)      # 리스트 안에 리스트
-    useHeader   <- rep(useHeader, len)              # 논리값 벡터
-    headerHeight<- rep(headerHeight, len)
-    
-    Map(parseAnythingToTable, rootNodes, rowSuplier, colSupliers, useHeader,headerHeight)
-  },
-  
-  # 범용 HTML 파서: 테이블 외 임의 구조도 → tibble로 변환
-  parseAnythingToTable = function(rootNode, rowSuplier, colSupliers, useHeader=FALSE, headerHeight=0){
-    rows <- rootNode %>% rowSuplier()  # 행 단위 노드 추출
-    cols <- vector(mode="list", length = length(colSupliers))  # 열 공간 준비
-    
-    print(paste0("rowlen: ", length(rows)))
-    
-    for(i in 1:length(rows)){
-      for(j in 1:length(cols)){
-        temp = colSupliers[[j]]
-        colItem <- rows[[i]] %>% temp %>% html_text2()  # 텍스트 추출
-        cols <- collectUtil$stackFromLeftEvenly(cols, length(cols), colItem, 1, 1)  # col 정렬
-      }
-    }
-    
-    ret <- bind_cols(cols)  # 열 기준 결합
-    if(useHeader){
-      ret <- ret %>% dataUtil$makeHeader(headerHeight)
-    }
-    return(ret)
-  },
   
   # HTML 전체 구조 스캔: 태그, 클래스, id, href, 텍스트, 노드 자체까지 저장
   htmlCollector = function(parent, predict=NULL) {
@@ -265,28 +247,19 @@ collectUtil <- list(
     return(tag_info)
   },
   
-  filterColumnElements = function(table, col, paths){
+  filterColumnElements = function(table, cols, paths){
     
     ret <- NULL
     supplier <- function(node){
-      ret <- list()
-      for(i in 1:length(paths)){
-        temp <- map(node, ~html_elements(., paths[i]))
-        ret[[i]] <- temp
-      }
-      ret <- do.call(Map, c(list(list), ret))
-      ret <- map(ret, ~ Filter(function(x) length(x) > 0, .))
-      print(ret)
-      return(ret)
+        temp <- map(node, ~html_elements(., paths))
     } 
     
-    if(is.character(col)){
-      ret <- table %>% mutate(across(any_of(col), ~ supplier(.)))
-    }
-    else if(is.numeric(col)){
-      ret <- table %>% mutate(across(col, ~ supplier(.)))
-    }
-    else{print("wrong input....")}
+    if(is.numeric(cols)) col_ <- colnames(table)[cols]
+    
+    print("selected cols:")
+    print(col_)
+    
+    ret <- table %>% mutate(across(all_of(col_), ~ supplier(.)))
     return(ret)
   }
 )
@@ -307,11 +280,11 @@ afterCollectUtil <- list(
       #ret <- map(x, ~map(., html_text2))
       ret <- map(x, function(x){
         if(class(x)!="xml_node") map(x, supplier)
-        else supplier(x)
+        else list(supplier(x))
       })
       ret <- map(ret, ~unlist(.))
       ret <- map(ret, ~Filter(function(x) length(x) > 0, .))
-      ret <- map(ret, ~paste(., collapse = ","))
+      ret <- map(ret, ~paste(., collapse = ",")) %>% unlist
     }
     table <- table %>% mutate(across(everything(), func1))
     return(table)
@@ -320,13 +293,21 @@ afterCollectUtil <- list(
   makeHeader = function(x, height){
     names <- x %>% slice_head(n=height) %>% summarise(across(everything(), ~ toString(.))) %>% unlist 
     for(i in 1:length(names)){
-      if(names[[i]] == "") names[[i]] <- as.character(i)
+      if(length(names[[i]]) == 0) names[[i]] <- as.character(i)
     }
-    names <- Map(function(names){
-      names <- str_split(names, ",\\s*")[[1]]
-      names <- unique(names) %>% str_flatten(collapse = ".")
-    }, names) %>% unlist
-    names(x) <- str_replace_all(make.names(str_squish(names), unique = TRUE), "\\.{2,}", ".")
+    
+    print("generated_names:")
+    print(names)
+    print(class(names))
+    
+    names <- make.names(str_squish(names), unique = TRUE)
+    names <- str_replace_all(names, "\\.{2,}", ".")
+    
+    print("generated_names:")
+    print(names)
+    print(class(names))
+    
+    names(x) <- names
     x <- x %>% slice(-1:(-1*height))
     return(x)
   }
