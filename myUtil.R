@@ -37,56 +37,81 @@ setUpUtil <- list(
   }
 )
 ###############################################################
-castUtil <- list(
-  numericCast = function(col, paterns = c(",", "%", "\\+", " ")){
+fromTable <- list(
+  
+  tryCast = function(table, cols, paterns, suppliers){
     
-    col <- as.character(col)
+    if(is.numeric(cols)) cols <- colnames(table)[cols]
+    print("tryCast.selected cols:")
+    print(cols)
     
-    for(i in 1:length(paterns)){
-      col <- col %>% str_remove_all(paterns[i])  
+    selected <- table %>% select(all_of(cols)) %>% mutate(across(everything(), as.character))
+    #전처리
+    for(i in paterns){
+      selected <- selected %>% mutate(across(everything(), ~str_remove_all(., i)))  
     }
-    
-    print("col: ")
-    print(col)
-    
-    ret <- as.integer(col)
-    if(any(is.na(ret))){
-      ret <- as.numeric(col)
+    #변환 후 확인
+    for(i in cols){
+      #print(sprintf("tryCast.curColName: %s", i))
+      for(j in 1:length(suppliers)){
+        temp <- selected %>% mutate(across(all_of(i), suppliers[[j]]))
+        if(!any(is.na(temp[[i]])) && !any(is.null(temp[[i]]))){
+          table[[i]] <- temp[[i]]
+          break
+        }
+        if(i == cols[length(cols)]){
+          warning(sprintf("tryCast: fail to convert row %s", i))  
+        }
+      }
     }
+    #print("numericCast.casted: ")
+    #print(ret)
     
-    print("casted col: ")
-    print(ret)
-    return(ret)
+    return(table)
   },
   
-  timeCast = function(x){
-    
-    try_cast <- function(expr) {
-      tryCatch(expr, error = function(e) NULL, warning = function(w) NULL)
-    }
-    
-    if(!is.character(x)) x <- as.character(x)
-    
-    res <- try_cast(ymd(x))
-    if (!is.null(res) && !all(is.na(res))) return(res)
-    res <- try_cast(dmy(x))
-    if (!is.null(res) && !all(is.na(res))) return(res)
-    res <- try_cast(as.Date(x))
-    if (!is.null(res) && !all(is.na(res))) return(res)
+  tryNumericCast = function(table, cols, paterns = c(",", "%", "\\+", " ")){
+    fromTable$tryCast(table, cols, paterns, list(as.integer, as.numeric))
   },
-  default_cast = function(x) {
+  
+  tryTimeCast = function(table, cols, paterns = c()){
     
-    res <- castUtil$numericCast(x)
-    if (!is.null(res) && !any(is.na(res))) return(res)
+    getTry <- function(supplier) {
+      function(col) {
+        tryCatch(supplier(col), error = function(e) NULL, warning = function(w) NULL)
+      }
+    }
+    fromTable$tryCast(table, cols, paterns, suppliers = list(getTry(ymd), getTry(dmy), getTry(as.Date)))
+  },
+  tryDefaultCast = function(table, cols) {
+    #먼저 수치 변환
+    ret <- fromTable$tryNumericCast(table, cols)
+    #변환 안된 열들에 대해 다른 변환을 시도
+    cols <- ret %>% select(where(is.character)) %>% colnames() %>% unlist()
+    print("tryDefaultCast.selected cols:")
+    print(cols)
+    ret <- fromTable$tryTimeCast(ret, cols)
+  },
+  
+  #일반 테이블에서 헤더를 만들때
+  makeHeader = function(x, height){
     
-    res <- castUtil$timeCast(x)
-    if (!is.null(res) && !any(is.na(res))) return(res)
+    #헤더를 하나의 행으로 압축
+    names <- x %>% slice_head(n=height) %>% summarise(across(everything(), ~ toString(.))) %>% unlist 
+    for(i in 1:length(names)){
+      if(length(names[[i]]) == 0) names[[i]] <- as.character(i)
+    }
+    names <- str_squish(names)
     
+    names <- make.names(names, unique = TRUE)
+    names <- str_replace_all(names, "\\.{2,}", ".")
+    
+    print("makeHeader.generated_names:")
+    print(names)
+    
+    names(x) <- names
+    x <- x %>% slice((height+1):nrow(x))
     return(x)
-  },
-  
-  default_cast_df = function(df) {
-    df %>% mutate(across(everything(), castUtil$default_cast))
   }
 )
 ##################################################
@@ -115,14 +140,16 @@ browerUtil <- list(
 )
 #############################################
 #크롤링 유틸
-collectUtil <- list(
+fromHtml <- list(
   parseAnything = function(rootNode, rowPath, colPath, rowLen = 0, padding = FALSE){
     
     rows <- rootNode %>% html_elements(rowPath)  # tr 기준으로 행 추출
     cols <- vector(mode="list", length = rowLen)  # 열 개수만큼 초기화
+    rowCnt <- length(rows)
     
-    print("rowlen:")
-    print(length(rows))
+    print(sprintf("parseAnything.rowPath: %s", rowPath))
+    print(sprintf("parseAnything.colPath: %s", colPath))
+    print(sprintf("parseAnything.rowCnt: %d", rowCnt))
     
     for(i in 1:length(rows)){
       elements <- rows[i] %>% html_elements(colPath)  # 셀 추출
@@ -135,60 +162,53 @@ collectUtil <- list(
           rowLen <- rowLen + colspan
         }
         cols <- vector(mode="list", length = rowLen)
-        print("autoRowlen: ")
-        print(rowLen)
+        print(sprintf("parseAnything.autoRowlen: %d", rowLen))
       }
       
       
       if(length(elements) != rowLen){
         
-        print("collen:")
-        print(paste(i,length(elements)))
-        print("rowLen:")
-        print(rowLen)
+        print("parseAnything.rowLen mismatch")
+        print(sprintf("at row %d", i))
+        print(sprintf("rowLen/curLen: %d/%d", rowLen, length(elements)))
         
         if(padding){
           if(length(elements) > rowLen){
-            print("column Length is larger...")
+            stop("column Length is larger...")
           }
         }
         else{
-          print("column Length mismatch...")
+          print("padding not allowed, return current work")
           break
         }
       }
       
       for(j in 1:length(elements)){
-        rowspan <- elements[j] %>% html_attr("rowspan")  # 병합 여부
+        rowspan <- elements[j] %>% html_attr("rowspan")
         colspan <- elements[j] %>% html_attr("colspan")
         
         if(is.na(colspan)) colspan <- 1 else colspan <- as.numeric(colspan)
         if(is.na(rowspan)) rowspan <- 1 else rowspan <- as.numeric(rowspan)
         
-        cols <- collectUtil$stackFromLeftEvenly(cols, rowLen, elements[j], rowspan, colspan)  # 셀 정렬
+        cols <- fromHtml$stackFromLeftEvenly(cols, rowLen, elements[j], rowspan, colspan)
       }
       if(padding && (rowLen > length(elements))){
-        print("pad:")
-        print(rowLen - length(elements))
-        for(j in 1:(rowLen - length(elements))){ #padding
-          cols <- collectUtil$stackFromLeftEvenly(cols, rowLen, elements[length(elements)], rowspan, colspan)
+        
+        print(sprint("padded: %d", rowLen - length(elements)))
+        
+        for(j in 1:(rowLen - length(elements))){
+          cols <- fromHtml$stackFromLeftEvenly(cols, rowLen, elements[length(elements)], rowspan, colspan)
         }
       }
     }
-    
-    print("row length: ")
-    print(length(cols))
-    print("col lengths: ")
-    Map(print, lapply(cols, length))
     
     names(cols) <- as.character(1:rowLen)
     ret <- do.call(tibble, cols)
     return(ret)
   },
   
-  # 범용 HTML 파서: 테이블 외 임의 구조도 → tibble로 변환
   parseChart = function(tableNode, rowLen=0, padding=FALSE){
-    collectUtil$parseAnything(tableNode, "tr", "th, td", rowLen, padding)
+    fromHtml$parseAnything(tableNode, "tr", "th, td", rowLen, padding)
   },
   
   stackFromLeftEvenly = function(tableCols, rowLen, toPut, rowspan, colspan){
@@ -250,34 +270,38 @@ collectUtil <- list(
   filterColumnElements = function(table, cols, paths){
     
     ret <- NULL
-    supplier <- function(node){
-        temp <- map(node, ~html_elements(., paths))
+    supplier <- function(col){
+        temp <- map(col, ~html_elements(., paths))
     } 
     
-    if(is.numeric(cols)) col_ <- colnames(table)[cols]
+    if(is.numeric(cols)) cols <- colnames(table)[cols]
     
-    print("selected cols:")
-    print(col_)
+    print("filterColumnElements.selected cols:")
+    print(cols)
     
-    ret <- table %>% mutate(across(all_of(col_), ~ supplier(.)))
+    ret <- table %>% mutate(across(all_of(cols), ~ supplier(.)))
     return(ret)
   }
 )
 #############################################################
-afterCollectUtil <- list(
-  toText = function(table){
-    afterCollectUtil$toValue(table, html_text2)
+fromNodes <- list(
+  colstoText = function(table, cols){
+    fromNodes$colstoValue(table, cols, html_text2)
   },
   
-  toHref = function(table){
-    afterCollectUtil$toValue(table, function(x){
+  colstoHref = function(table, cols){
+    fromNodes$colstoValue(table, cols, function(x){
       html_attr(x, "href")
     })
   },
   
-  toValue = function(table, supplier){
+  colstoValue = function(table, cols, supplier){
+    
+    if(is.numeric(cols)) cols <- colnames(table)[cols]
+    print("colstoValue.selected cols:")
+    print(cols)
+    
     func1 <- function(x){
-      #ret <- map(x, ~map(., html_text2))
       ret <- map(x, function(x){
         if(class(x)!="xml_node") map(x, supplier)
         else list(supplier(x))
@@ -286,29 +310,33 @@ afterCollectUtil <- list(
       ret <- map(ret, ~Filter(function(x) length(x) > 0, .))
       ret <- map(ret, ~paste(., collapse = ",")) %>% unlist
     }
-    table <- table %>% mutate(across(everything(), func1))
+    table <- table %>% select(all_of(cols)) %>% mutate(across(everything(), func1))
     return(table)
   },
   
-  makeHeader = function(x, height){
-    names <- x %>% slice_head(n=height) %>% summarise(across(everything(), ~ toString(.))) %>% unlist 
+  #노드 테이블에서 해더를 만들때때
+  makeHeader = function(x, height, cssPath=NULL){
+    
+    #헤더를 하나의 행으로 압축
+    names <- x %>% slice_head(n=height) 
+    if(!is.null(cssPath)){
+      names <- names %>% mutate(across(everything(), html_elements(cssPath)))
+    }
+    names <- names %>% fromNodes$colstoText(colnames(names))
+    names <- names %>% summarise(across(everything(), ~ toString(.))) %>% unlist 
     for(i in 1:length(names)){
       if(length(names[[i]]) == 0) names[[i]] <- as.character(i)
     }
+    names <- str_squish(names)
     
-    print("generated_names:")
-    print(names)
-    print(class(names))
-    
-    names <- make.names(str_squish(names), unique = TRUE)
+    names <- make.names(names, unique = TRUE)
     names <- str_replace_all(names, "\\.{2,}", ".")
-    
-    print("generated_names:")
+  
+    print("makeHeader.generated_names:")
     print(names)
-    print(class(names))
     
     names(x) <- names
-    x <- x %>% slice(-1:(-1*height))
+    x <- x %>% slice((height+1):nrow(x))
     return(x)
   }
 )
