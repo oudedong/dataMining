@@ -13,6 +13,7 @@ setUpUtil <- list(
     library(data.table)
     library(rlang)
     library(stringi)
+    library(xml2)
   },
   
   installLib = function(){
@@ -27,7 +28,7 @@ setUpUtil <- list(
     install.packages("gganimate")
     install.packages("gifski")
     install.packages("rlang")
-    
+    install.packages("xm12")
   },
   
   setRselenium = function(port=4445L){
@@ -141,9 +142,99 @@ browerUtil <- list(
 #############################################
 #크롤링 유틸
 fromHtml <- list(
+  
+  #nodeset에서 자손의 자손은 제거
+  onlyOuter = function(nodeset){
+    keep(nodeset, function(node) {
+      !any(map_lgl(nodeset, function(other) {
+        #!identical(node, other) && any(node %in% (html_elements(other, "*")))
+        
+        a <- !identical(node, other)
+        b <- html_elements(other, xpath=".//*")
+        c <- FALSE
+        if(length(b) != 0) {
+          for(i in 1:length(b)){
+            if(identical(node, b[[i]])){
+              c <- TRUE
+              break
+            }
+          }
+        }
+        a && c
+      }))
+    })
+  },
+  
+  getEmptyNodeset = function(){
+    doc <- read_html("<html><p>padding</p></html>")
+    empty_nodeset <- html_elements(doc, "p")
+  },
+  
+  #행에서 지정된 노드들을 가져와서 배치함
+  placeHolderParser = function(rootNode, rowPath, colPaths){
+    
+    rows <- rootNode %>% html_elements(rowPath)  # 행 추출
+    rows <- fromHtml$onlyOuter(rows)
+    print(sprintf("placeHolderParser.colLength: %d", length(rows)))
+    rowLen <- length(colPaths)
+    print(sprintf("placeHolderParser.rowLength: %d", rowLen))
+    cols <- vector(mode="list", length = rowLen)  # 열 개수만큼 초기화
+    names(cols) <- colPaths
+    
+    for(row in 1:length(rows)){
+      for(col in colPaths){
+        found <- rows[[row]] %>% html_elements(col)
+        found <- fromHtml$onlyOuter(found)
+        if(length(found) == 0){
+          print(sprintf("placeHolderParser: elements at [%d, %s] is empty", row, col))
+        }
+        cols <- fromHtml$stackFromLeftEvenly(cols, rowLen, found, 1, 1)
+      }
+    }
+    do.call(tibble, cols)
+  },
+  
+  #행에서 모든 노드들을 모아줌
+  justGiveRowPathParser = function(rootNode, rowPath){
+    
+    rows <- rootNode %>% html_elements(rowPath)
+    rows <- rows %>% fromHtml$onlyOuter()
+    print(sprintf("justGiveRowPathParser.colLength: %d", length(rows)))
+    rowsElements <- list()
+    
+    for(row in 1:length(rows)){
+      elements <- rows[[row]] %>% html_elements("*")
+      elements <- fromHtml$onlyOuter(elements)
+      
+      tempState <- list()  #노드의 개수를 셈
+      tempRet = list()     #결과 한줄
+
+      for(e in elements){
+        
+        tagName <- e %>% xml_name()
+        tagState <- tempState[[tagName]] #노드가 몇번째인지 확인
+        print(tagState)
+        
+        if(is.null(tagState)){ #처음이면
+          tempState[[tagName]] <- 1
+          tempRet[[paste0(tagName, ".1")]] <- list(e)
+          next
+        }
+        tempState[[tagName]] <- tagState+1
+        tempRet[[paste0(tagName, ".", tagState+1)]] <- list(e)
+      }
+      print(names(tempRet))
+      rowsElements <- c(rowsElements, list(tempRet))
+    }
+    bind_rows(rowsElements)
+  },
+  
+  #노드를 테이블 형식으로 배치
+  #padding 활성화시 행들의 길이가 다르면 빈 노드로 길이를 맞춤
   parseAnything = function(rootNode, rowPath, colPath, rowLen = 0, padding = FALSE){
     
-    rows <- rootNode %>% html_elements(rowPath)  # tr 기준으로 행 추출
+    rows <- rootNode %>% html_elements(rowPath)  #행 추출
+    rows <- fromHtml$onlyOuter(rows)
     cols <- vector(mode="list", length = rowLen)  # 열 개수만큼 초기화
     rowCnt <- length(rows)
     
@@ -153,6 +244,7 @@ fromHtml <- list(
     
     for(i in 1:length(rows)){
       elements <- rows[i] %>% html_elements(colPath)  # 셀 추출
+      elements <- fromHtml$onlyOuter(elements)
       
       if(rowLen == 0){
         for(j in 1:length(elements)){
@@ -165,24 +257,13 @@ fromHtml <- list(
         print(sprintf("parseAnything.autoRowlen: %d", rowLen))
       }
       
-      
-      if(length(elements) != rowLen){
-        
-        print("parseAnything.rowLen mismatch")
-        print(sprintf("at row %d", i))
-        print(sprintf("rowLen/curLen: %d/%d", rowLen, length(elements)))
-        
-        if(padding){
-          if(length(elements) > rowLen){
-            stop("column Length is larger...")
-          }
-        }
-        else{
-          print("padding not allowed, return current work")
-          break
+      totalLength <- 0
+      requiredLength <- rowLen
+      for(j in 1:rowLen){
+        if(length(cols[[j]]) >= i){
+          requiredLength <- requiredLength-1
         }
       }
-      
       for(j in 1:length(elements)){
         rowspan <- elements[j] %>% html_attr("rowspan")
         colspan <- elements[j] %>% html_attr("colspan")
@@ -191,17 +272,35 @@ fromHtml <- list(
         if(is.na(rowspan)) rowspan <- 1 else rowspan <- as.numeric(rowspan)
         
         cols <- fromHtml$stackFromLeftEvenly(cols, rowLen, elements[j], rowspan, colspan)
+        totalLength <- totalLength + colspan
       }
-      if(padding && (rowLen > length(elements))){
+      
+      if(totalLength != requiredLength){
         
-        print(sprint("padded: %d", rowLen - length(elements)))
+        print("parseAnything.rowLen mismatch")
+        print(sprintf("parseAnything.length(elements): %d", length(elements)))
+        print(sprintf("at row %d", i))
+        print(sprintf("totalLength/requiredLength: %d/%d", totalLength, requiredLength))
         
-        for(j in 1:(rowLen - length(elements))){
-          cols <- fromHtml$stackFromLeftEvenly(cols, rowLen, elements[length(elements)], rowspan, colspan)
+        if(padding){
+          if(totalLength > requiredLength){
+            stop("column Length is larger...")
+          }
+          print(sprintf("padded: %d", requiredLength - totalLength))
+          empty_nodeset <- fromHtml$getEmptyNodeset()
+          for(j in 1:(requiredLength - totalLength)){
+            cols <- fromHtml$stackFromLeftEvenly(cols, rowLen, empty_nodeset, 1, 1)
+          }
+        }
+        else{
+          stop("padding not allowed, return current work")
         }
       }
+      
     }
     
+    print("colLength:")
+    print(paste(as.character(map(cols, length))))
     names(cols) <- as.character(1:rowLen)
     ret <- do.call(tibble, cols)
     return(ret)
@@ -267,11 +366,12 @@ fromHtml <- list(
     return(tag_info)
   },
   
-  filterColumnElements = function(table, cols, paths){
+  filterColumnElements = function(table, cols, paths, onlySelected=FALSE){
     
     ret <- NULL
     supplier <- function(col){
         temp <- map(col, ~html_elements(., paths))
+        temp <- fromHtml$onlyOuter(temp)
     } 
     
     if(is.numeric(cols)) cols <- colnames(table)[cols]
@@ -279,6 +379,7 @@ fromHtml <- list(
     print("filterColumnElements.selected cols:")
     print(cols)
     
+    if(onlySelected){table <- table %>% select(all_of(cols))}
     ret <- table %>% mutate(across(all_of(cols), ~ supplier(.)))
     return(ret)
   }
@@ -286,35 +387,35 @@ fromHtml <- list(
 #############################################################
 fromNodes <- list(
   colstoText = function(table, cols){
-    fromNodes$colstoValue(table, cols, html_text2)
+    fromNodes$colstoString(table, cols, html_text2)
   },
   
   colstoHref = function(table, cols){
-    fromNodes$colstoValue(table, cols, function(x){
+    fromNodes$colstoString(table, cols, function(x){
       html_attr(x, "href")
     })
   },
   
-  colstoValue = function(table, cols, supplier){
+  colstoString = function(table, cols, supplier){
     
     if(is.numeric(cols)) cols <- colnames(table)[cols]
     print("colstoValue.selected cols:")
     print(cols)
     
     func1 <- function(x){
-      ret <- map(x, function(x){
+      ret <- map(x, function(x){ #각 xml_node에서 문자들을 추출출
         if(class(x)!="xml_node") map(x, supplier)
         else list(supplier(x))
       })
       ret <- map(ret, ~unlist(.))
       ret <- map(ret, ~Filter(function(x) length(x) > 0, .))
-      ret <- map(ret, ~paste(., collapse = ",")) %>% unlist
+      ret <- map(ret, ~paste(., collapse = ",")) %>% unlist %>% unname()
     }
     table <- table %>% select(all_of(cols)) %>% mutate(across(everything(), func1))
     return(table)
   },
   
-  #노드 테이블에서 해더를 만들때때
+  #노드 테이블에서 해더를 만들때
   makeHeader = function(x, height, cssPath=NULL){
     
     #헤더를 하나의 행으로 압축
